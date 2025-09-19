@@ -33,6 +33,26 @@ const ziputils = require('./ziputils');
 const statusCodes = require('./statusCodes');
 const logger = require('./logger');
 
+const HIGH_QUALITY_OPTIONS = {
+    dsm: true,
+    "orthophoto-resolution": 2,
+    "pc-quality": "high",
+    "pc-geometric": true,
+    "mesh-size": 300000,
+    "mesh-octree-depth": 11,
+    "mesh-samples": 1.0,
+    "mesh-quality": "ultra",
+    "texturing-nadir-weight": 32,
+    "texturing-data-term": "area",
+    "depthmap-resolution": 2048,
+    "use-opensfm-dense": true,
+    "ignore-gsd": true,
+    "min-num-features": 12000
+};
+
+
+
+
 const download = function(uri, filename, callback) {
     request.head(uri, function(err, res, body) {
         if (err) callback(err);
@@ -90,24 +110,6 @@ const upload = multer({
         }
     })
 });
-
-// 🔹 High Quality Options
-const HIGH_QUALITY_OPTIONS = {
-    dsm: true,
-    "orthophoto-resolution": 2,
-    "pc-quality": "high",
-    "pc-geometric": true,
-    "mesh-size": 300000,
-    "mesh-octree-depth": 11,
-    "mesh-samples": 1.0,
-    "mesh-quality": "ultra",
-    "texturing-nadir-weight": 32,
-    "texturing-data-term": "area",
-    "depthmap-resolution": 2048,
-    "use-opensfm-dense": true,
-    "ignore-gsd": true,
-    "min-num-features": 12000
-};
 
 module.exports = {
     assignUUID: (req, res, next) => {
@@ -205,9 +207,6 @@ module.exports = {
     handleInit: (req, res) => {
         req.body = req.body || {};
         
-        // 🔹 Merge High Quality options
-        req.body.options = { ...req.body.options, ...HIGH_QUALITY_OPTIONS };
-
         const srcPath = path.join("tmp", req.id);
         const bodyFile = path.join(srcPath, "body.json");
 
@@ -276,6 +275,10 @@ module.exports = {
                     fs.stat(destPath, (err, stat) => {
                         if (err && err.code === 'ENOENT') cb();
                         else{
+                            // Directory already exists, this could happen
+                            // if a previous attempt at upload failed and the user
+                            // used set-uuid to specify the same UUID over the previous run
+                            // Try to remove it
                             removeDirectory(destPath, err => {
                                 if (err) cb(new Error(`Directory exists and we couldn't remove it.`));
                                 else cb();
@@ -309,13 +312,18 @@ module.exports = {
             cb => fs.mkdir(destPath, undefined, cb),
             cb => fs.mkdir(destGcpPath, undefined, cb),
             cb => {
+                // We attempt to do this multiple times,
+                // as antivirus software sometimes is scanning
+                // the folder while we try to move it, resulting in
+                // an operation not permitted error
                 let retries = 0;
+
                 const move = () => {
                     mv(srcPath, destImagesPath, err => {
-                        if (!err) cb();
+                        if (!err) cb(); // Done
                         else{
                             if (++retries < 20){
-                                logger.warn(`Cannot move ${srcPath}, probably caused by antivirus software, retrying (${retries})...`);
+                                logger.warn(`Cannot move ${srcPath}, probably caused by antivirus software (please disable it or add an exception), retrying (${retries})...`);
                                 setTimeout(move, 2000);
                             } else {
                                 logger.error(`Unable to move temp images (${srcPath}) after 20 retries. Error: ${err}`);
@@ -332,10 +340,15 @@ module.exports = {
                     const seedFileDst = path.join(destPath, "seed.zip");
 
                     async.series([
+                        // Move to project root
                         cb => mv(path.join(destImagesPath, "seed.zip"), seedFileDst, cb),
+                        
+                        // Extract
                         cb => {
                             ziputils.unzip(seedFileDst, destPath, cb);
                         },
+
+                        // Remove
                         cb => {
                             fs.exists(seedFileDst, exists => {
                                 if (exists) fs.unlink(seedFileDst, cb);
@@ -346,11 +359,13 @@ module.exports = {
                 }
 
                 const handleZipUrl = (cb) => {
+                    // Extract images
                     ziputils.unzip(path.join(destImagesPath, "zipurl.zip"), 
                                     destImagesPath, 
                                     cb, true);
                 }
 
+                // Find and handle zip files and extract
                 fs.readdir(destImagesPath, (err, entries) => {
                     if (err) cb(err);
                     else {
@@ -371,6 +386,8 @@ module.exports = {
             },
 
             cb => {
+                // Find any *.txt (GCP) file or alignment file and move it to the data/<uuid>/gcp directory
+                // also remove any lingering zipurl.zip
                 fs.readdir(destImagesPath, (err, entries) => {
                     if (err) cb(err);
                     else {
@@ -393,14 +410,14 @@ module.exports = {
 
             async.series([
                 cb => {
+                    // Basic path check
                     fs.exists(srcPath, exists => {
                         if (exists) cb();
                         else cb(new Error(`Invalid UUID`));
                     });
                 },
                 cb => {
-                    // 🔹 Merge High Quality options before filter
-                    odmInfo.filterOptions({ ...req.body.options, ...HIGH_QUALITY_OPTIONS }, (err, options) => {
+                    odmInfo.filterOptions(req.body.options, (err, options) => {
                         if (err) cb(err);
                         else {
                             req.body.options = options;
@@ -426,8 +443,12 @@ module.exports = {
                     res.json({ uuid: req.id });
                     cb();
 
+                    // We return a UUID right away but continue
+                    // doing processing in the background
+
                     task.initialize(err => {
                         if (err) {
+                            // Cleanup
                             removeDirectory(srcPath);
                             removeDirectory(destPath);
                         } else TaskManager.singleton().processNextTask();

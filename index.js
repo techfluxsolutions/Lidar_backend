@@ -782,6 +782,10 @@ app.get('/info', authCheck, (req, res) => {
     });
 });
 
+app.get('/hello', (req, res) => {
+    res.json('Hello user');
+})
+
 /** @swagger
  * /auth/info:
  *   get:
