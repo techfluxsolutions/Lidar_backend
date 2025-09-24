@@ -1,1 +1,5 @@
 docker run -p 3000:3000 --entrypoint node lidar index.js
+
+feacher quaality high
+docker run -ti -p 3000:3000 opendronemap/nodeodm --feature-quality high
+
